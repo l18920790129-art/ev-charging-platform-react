@@ -7,6 +7,7 @@ import { z } from "zod";
 import { getDb } from "./db";
 import { poiData, trafficFlow, exclusionZones, chargingStations, analysisHistory, reportHistory, memorySessions } from "../drizzle/schema";
 import { eq, desc } from "drizzle-orm";
+import { STATIC_POI_DATA, STATIC_TRAFFIC_FLOW, STATIC_EXCLUSION_ZONES, STATIC_CHARGING_STATIONS, getStaticDashboardStats } from "./staticData";
 
 // ─── 地理计算工具 ───────────────────────────────────────────────
 function haversine(lat1: number, lng1: number, lat2: number, lng2: number): number {
@@ -45,14 +46,18 @@ function getCategoryDisplay(cat: string): string {
 // ─── 智能评分引擎 ───────────────────────────────────────────────
 async function quickScore(lat: number, lng: number) {
   const db = await getDb();
-  if (!db) throw new Error("Database unavailable");
 
-  const [pois, roads, zones, stations] = await Promise.all([
+  const [pois, roads, zones, stations] = db ? await Promise.all([
     db.select().from(poiData),
     db.select().from(trafficFlow),
     db.select().from(exclusionZones),
     db.select().from(chargingStations),
-  ]);
+  ]) : [
+    STATIC_POI_DATA.map(p => ({ ...p, influenceWeight: 1.0, boundaryJson: null as string | null, createdAt: new Date() })),
+    STATIC_TRAFFIC_FLOW.map(r => ({ ...r, heatWeight: 1.0, centerLat: r.latitude, centerLng: r.longitude, roadLevel: 'arterial', createdAt: new Date() })),
+    STATIC_EXCLUSION_ZONES.map(z => ({ ...z, boundaryJson: null as string | null, createdAt: new Date() })),
+    STATIC_CHARGING_STATIONS.map(s => ({ ...s, connectors: s.chargerCount, createdAt: new Date() })),
+  ];
 
   // 禁区检查（一票否决）
   const conflicts: string[] = [];
@@ -174,9 +179,9 @@ export const appRouter = router({
       .input(z.object({ category: z.string().optional(), district: z.string().optional() }).optional())
       .query(async ({ input }) => {
         const db = await getDb();
-        if (!db) return { data: [], total: 0 };
-        const rows = await db.select().from(poiData);
-        const filtered = rows.filter(r =>
+        const rows: any[] = db ? await db.select().from(poiData)
+          : STATIC_POI_DATA.map(p => ({ ...p, influenceWeight: 1.0, boundaryJson: null, createdAt: new Date() }));
+        const filtered = rows.filter((r: any) =>
           (!input?.category || r.category === input.category) &&
           (!input?.district || r.district.includes(input.district ?? ""))
         );
@@ -185,28 +190,28 @@ export const appRouter = router({
 
     getTrafficFlow: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { data: [], total: 0 };
-      const rows = await db.select().from(trafficFlow);
+      const rows: any[] = db ? await db.select().from(trafficFlow)
+        : STATIC_TRAFFIC_FLOW.map(r => ({ ...r, heatWeight: 1.0, centerLat: r.latitude, centerLng: r.longitude, roadLevel: 'arterial', createdAt: new Date() }));
       return { data: rows, total: rows.length };
     }),
 
     getExclusionZones: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { data: [], total: 0 };
-      const rows = await db.select().from(exclusionZones);
+      const rows: any[] = db ? await db.select().from(exclusionZones)
+        : STATIC_EXCLUSION_ZONES.map(z => ({ ...z, boundaryJson: null, createdAt: new Date() }));
       return { data: rows, total: rows.length };
     }),
 
     getChargingStations: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return { data: [], total: 0 };
-      const rows = await db.select().from(chargingStations);
+      const rows: any[] = db ? await db.select().from(chargingStations)
+        : STATIC_CHARGING_STATIONS.map(s => ({ ...s, connectors: s.chargerCount, createdAt: new Date() }));
       return { data: rows, total: rows.length };
     }),
 
     getDashboardStats: publicProcedure.query(async () => {
       const db = await getDb();
-      if (!db) return null;
+      if (!db) return getStaticDashboardStats();
       const [pois, roads, zones, stations] = await Promise.all([
         db.select().from(poiData),
         db.select().from(trafficFlow),

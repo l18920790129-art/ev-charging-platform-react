@@ -28,3 +28,12 @@
 ## 测试
 - [x] Vitest：11/11 全部通过
 - [x] 覆盖：getDashboardStats、getPOI、getTrafficFlow、getExclusionZones、getChargingStations、quickScore、auth.logout
+
+## Bug修复 - 数据显示为0
+
+- [ ] 诊断API数据加载失败根因
+- [ ] 修复数据库种子脚本确保数据写入成功
+- [ ] 修复热力图页面数据加载（道路流量数据）
+- [ ] 修复数据大屏统计数据显示
+- [ ] 修复AI分析页面数据
+- [ ] 推送修复到GitHub/Render

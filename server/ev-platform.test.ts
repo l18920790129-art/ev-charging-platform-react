@@ -121,3 +121,49 @@ describe("auth.logout", () => {
     expect(clearedCookies.length).toBe(1);
   });
 });
+
+describe("maps.getTrafficFlow path generation", () => {
+  it("returns traffic data with path field", async () => {
+    const caller = appRouter.createCaller(createCtx());
+    const result = await caller.maps.getTrafficFlow();
+    expect(result.data.length).toBeGreaterThan(0);
+    const road = result.data[0];
+    expect(road).toHaveProperty("path");
+    expect(Array.isArray(road.path)).toBe(true);
+    expect(road.path.length).toBeGreaterThanOrEqual(2);
+    const point = road.path[0];
+    expect(point).toHaveProperty("lat");
+    expect(point).toHaveProperty("lng");
+  });
+});
+
+describe("reports.generate fallback", () => {
+  it("generates report without LLM", async () => {
+    const caller = appRouter.createCaller(createCtx());
+    const result = await caller.reports.generate({
+      lat: 26.0756, lng: 119.3034,
+      address: "福州市鼓楼区五四路",
+      sessionId: "test-session-" + Date.now(),
+    });
+    expect(result).toHaveProperty("reportContent");
+    expect(typeof result.reportContent).toBe("string");
+    expect(result.reportContent.length).toBeGreaterThan(100);
+    expect(result).toHaveProperty("score");
+    expect(result).toHaveProperty("address");
+  }, 30000);
+});
+
+describe("analysis.aiAnalysis fallback", () => {
+  it("returns analysis content without LLM", async () => {
+    const caller = appRouter.createCaller(createCtx());
+    const result = await caller.analysis.aiAnalysis({
+      lat: 26.0756, lng: 119.3034,
+      userMessage: "这个位置适合建充电桩吗？",
+      sessionId: "test-session-" + Date.now(),
+    });
+    expect(result).toHaveProperty("content");
+    expect(typeof result.content).toBe("string");
+    expect(result.content.length).toBeGreaterThan(50);
+    expect(result).toHaveProperty("score");
+  }, 30000);
+});

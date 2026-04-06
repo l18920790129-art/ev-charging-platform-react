@@ -190,8 +190,21 @@ export const appRouter = router({
 
     getTrafficFlow: publicProcedure.query(async () => {
       const db = await getDb();
-      const rows: any[] = db ? await db.select().from(trafficFlow)
+      const rawRows: any[] = db ? await db.select().from(trafficFlow)
         : STATIC_TRAFFIC_FLOW.map(r => ({ ...r, heatWeight: 1.0, centerLat: r.latitude, centerLng: r.longitude, roadLevel: 'arterial', createdAt: new Date() }));
+      // 为每条道路生成路径坐标（基于中心点生成道路线段）
+      const rows = rawRows.map(r => {
+        if (r.path) return r; // 已有path则直接使用
+        const lat = r.centerLat ?? r.latitude;
+        const lng = r.centerLng ?? r.longitude;
+        const len = 0.015; // 约1.5km的路段
+        // 根据道路名称判断方向（东西向或南北向）
+        const isEW = r.roadName?.includes('路') || r.roadName?.includes('大道');
+        const path = isEW
+          ? [{ lat, lng: lng - len }, { lat, lng: lng + len }]
+          : [{ lat: lat - len, lng }, { lat: lat + len, lng }];
+        return { ...r, path, name: r.roadName ?? r.name };
+      });
       return { data: rows, total: rows.length };
     }),
 
@@ -276,8 +289,25 @@ export const appRouter = router({
           ...(input.history?.slice(-6).map(h => ({ role: h.role as "user" | "assistant", content: h.content })) ?? []),
           { role: "user" as const, content: input.userMessage },
         ];
-        const response = await invokeLLM({ messages });
-        const content = response.choices[0]?.message?.content ?? "分析完成，请查看评分结果。";
+        let content: string;
+        try {
+          const response = await invokeLLM({ messages });
+          content = String(response.choices[0]?.message?.content ?? "分析完成，请查看评分结果。");
+        } catch {
+          // LLM不可用时，使用本地规则引擎生成分析内容
+          const q = input.userMessage.toLowerCase();
+          if (q.includes("适合") || q.includes("建议") || q.includes("可行")) {
+            content = `## 选址可行性分析\n\n**综合评分：${score.totalScore}/10（${score.grade}）**\n\n根据系统评估，该位置${score.totalScore >= 8 ? "**非常适合**建设充电桩" : score.totalScore >= 6 ? "**基本适合**建设充电桩，但需关注部分风险" : "**暂不推荐**建设充电桩，建议选择评分更高的位置"}。\n\n**各维度评分：**\n- POI密度：${score.scoreBreakdown.poi}/10\n- 交通流量：${score.scoreBreakdown.traffic}/10\n- 可达性：${score.scoreBreakdown.accessibility}/10\n- 竞争分析：${score.scoreBreakdown.competition}/10\n\n${score.exclusionConflicts.length > 0 ? "⚠️ **注意：** 该位置与以下禁区存在冲突：" + score.exclusionConflicts.join("、") : "✅ 无禁区冲突"}\n\n**周边POI：** ${score.nearbyPois.slice(0, 5).map((p: any) => p.name + "(" + p.dist + "km)").join("、")}`;
+          } else if (q.includes("poi") || q.includes("周边") || q.includes("需求")) {
+            content = `## 周边POI分析\n\n**周边主要兴趣点（${score.nearbyPois.length}个）：**\n\n${score.nearbyPois.slice(0, 8).map((p: any, i: number) => (i+1) + ". **" + p.name + "**（" + p.categoryDisplay + "）- 距离" + p.dist + "km，日均流量" + (p.dailyFlow?.toLocaleString() ?? "N/A") + "人次，需求评分" + p.evDemandScore + "/10").join("\n")}\n\n**分析结论：** 该区域POI密度评分${score.scoreBreakdown.poi}/10，${score.scoreBreakdown.poi >= 7 ? "周边人流量充足，充电需求旺盛" : "周边人流量一般，建议进一步调研"}。`;
+          } else if (q.includes("竞争") || q.includes("充电站")) {
+            content = `## 竞争态势分析\n\n**竞争评分：${score.scoreBreakdown.competition}/10**\n\n${score.scoreBreakdown.competition >= 8 ? "该区域现有充电站较少，市场竞争压力小，是建站的有利条件。" : score.scoreBreakdown.competition >= 6 ? "该区域有少量充电站，竞争适中，建议差异化运营。" : "该区域充电站密度较高，竞争激烈，建议评估盈利空间后谨慎决策。"}\n\n**建议：** ${score.scoreBreakdown.competition >= 7 ? "可考虑建设大功率快充站，满足市场空白" : "建议提升服务质量和充电速度，形成差异化竞争优势"}。`;
+          } else if (q.includes("交通") || q.includes("流量")) {
+            content = `## 交通流量分析\n\n**交通评分：${score.scoreBreakdown.traffic}/10**\n\n**周边主要道路：**\n${score.nearbyRoads.slice(0, 5).map((r: any, i: number) => (i+1) + ". **" + r.name + "** - 日均流量" + (r.dailyFlow?.toLocaleString() ?? "N/A") + "辆，新能源占比" + (((r.evRatio ?? 0) * 100).toFixed(0)) + "%，高峰时段" + (r.peakHour ?? "N/A")).join("\n")}\n\n**分析结论：** ${score.scoreBreakdown.traffic >= 7 ? "该区域交通流量充足，新能源车占比较高，充电需求有保障。" : "该区域交通流量一般，建议结合周边规划综合评估。"}`;
+          } else {
+            content = `## 智能选址分析\n\n**位置：** 纬度${input.lat.toFixed(4)}，经度${input.lng.toFixed(4)}\n**综合评分：${score.totalScore}/10（${score.grade}）**\n\n| 评分维度 | 得分 | 说明 |\n|---------|------|------|\n| POI密度 | ${score.scoreBreakdown.poi}/10 | 周边兴趣点密度 |\n| 交通流量 | ${score.scoreBreakdown.traffic}/10 | 道路车流量 |\n| 可达性 | ${score.scoreBreakdown.accessibility}/10 | 交通便利程度 |\n| 竞争分析 | ${score.scoreBreakdown.competition}/10 | 市场竞争程度 |\n\n${score.exclusionConflicts.length > 0 ? "⚠️ **禁区冲突：**" + score.exclusionConflicts.join("、") : "✅ 无禁区冲突"}\n\n**综合建议：** ${score.totalScore >= 8 ? "强烈推荐在此建设充电桩，各项指标均表现优秀。" : score.totalScore >= 6 ? "可以考虑在此建设充电桩，建议重点关注评分较低的维度。" : "不建议在此建设充电桩，请选择综合评分更高的位置。"}`;
+          }
+        }
 
         const db = await getDb();
         if (db) {
@@ -322,13 +352,80 @@ export const appRouter = router({
 禁区冲突：${score.exclusionConflicts.length > 0 ? score.exclusionConflicts.join("、") : "无"}
 请生成包含：1.选址概述 2.评分详析 3.周边环境 4.竞争态势 5.风险评估 6.综合建议 的完整报告。`;
 
-        const response = await invokeLLM({
-          messages: [
-            { role: "system", content: "你是专业的新能源充电桩选址顾问，生成结构清晰、数据详实的选址分析报告。" },
-            { role: "user", content: prompt },
-          ],
-        });
-        const reportContent = response.choices[0]?.message?.content ?? "报告生成失败，请重试。";
+        let reportContent: string;
+        try {
+          const response = await invokeLLM({
+            messages: [
+              { role: "system", content: "你是专业的新能源充电桩选址顾问，生成结构清晰、数据详实的选址分析报告。" },
+              { role: "user", content: prompt },
+            ],
+          });
+          reportContent = String(response.choices[0]?.message?.content ?? "报告生成失败，请重试。");
+        } catch {
+          // LLM不可用时，使用本地模板生成报告
+          const s = score;
+          reportContent = `# 福州新能源充电桩选址分析报告
+
+## 一、选址概述
+
+**位置：** ${input.address}（${input.lat.toFixed(4)}, ${input.lng.toFixed(4)}）
+**报告生成时间：** ${new Date().toLocaleString("zh-CN")}
+**综合评分：** ${s.totalScore}/10（${s.grade}）
+
+本报告基于福州市新能源充电桩智能选址系统，综合分析该位置的POI密度、交通流量、可达性及竞争态势，为充电桩建设决策提供数据支撑。
+
+---
+
+## 二、评分详析
+
+| 评分维度 | 得分 | 权重 | 评级 |
+|---------|------|------|------|
+| POI密度 | ${s.scoreBreakdown.poi}/10 | 35% | ${s.scoreBreakdown.poi >= 8 ? "优秀" : s.scoreBreakdown.poi >= 6 ? "良好" : "一般"} |
+| 交通流量 | ${s.scoreBreakdown.traffic}/10 | 30% | ${s.scoreBreakdown.traffic >= 8 ? "优秀" : s.scoreBreakdown.traffic >= 6 ? "良好" : "一般"} |
+| 可达性 | ${s.scoreBreakdown.accessibility}/10 | 20% | ${s.scoreBreakdown.accessibility >= 8 ? "优秀" : s.scoreBreakdown.accessibility >= 6 ? "良好" : "一般"} |
+| 竞争分析 | ${s.scoreBreakdown.competition}/10 | 15% | ${s.scoreBreakdown.competition >= 8 ? "优秀" : s.scoreBreakdown.competition >= 6 ? "良好" : "一般"} |
+| **综合得分** | **${s.totalScore}/10** | 100% | **${s.grade}** |
+
+---
+
+## 三、周边环境分析
+
+**周边主要POI（${s.nearbyPois.length}个）：**
+
+${s.nearbyPois.slice(0, 8).map((p: any, i: number) => (i+1) + ". **" + p.name + "**（" + p.categoryDisplay + "）- 距离" + p.dist + "km，日均流量" + (p.dailyFlow?.toLocaleString() ?? "N/A") + "人次").join("\n")}
+
+---
+
+## 四、交通态势分析
+
+**周边主要道路：**
+
+${s.nearbyRoads.slice(0, 5).map((r: any, i: number) => (i+1) + ". **" + r.name + "** - 日均流量" + (r.dailyFlow?.toLocaleString() ?? "N/A") + "辆，新能源占比" + (((r.evRatio ?? 0) * 100).toFixed(0)) + "%，高峰时段" + (r.peakHour ?? "N/A")).join("\n")}
+
+---
+
+## 五、风险评估
+
+${s.exclusionConflicts.length > 0 ? `⚠️ **禁区冲突警告：** 该位置与以下禁区存在冲突，**不建议建站**：
+${s.exclusionConflicts.join("、")}` : "✅ **无禁区冲突：** 该位置不在任何禁止建设区域内。"}
+
+**主要风险点：**
+${s.totalScore < 6 ? "- 综合评分偏低，建议重新选址" : ""}
+${s.scoreBreakdown.poi < 5 ? "- 周边POI密度不足，充电需求可能有限" : ""}
+${s.scoreBreakdown.traffic < 5 ? "- 交通流量较低，建议评估实际需求" : ""}
+${s.scoreBreakdown.competition < 5 ? "- 周边竞争激烈，需差异化运营策略" : ""}
+${s.totalScore >= 7 && s.exclusionConflicts.length === 0 ? "- 整体风险较低，建议推进可行性研究" : ""}
+
+---
+
+## 六、综合建议
+
+${s.totalScore >= 8 ? "**强烈推荐建站。** 该位置综合评分" + s.totalScore + "/10，各项指标均表现优秀。建议：\n1. 规划建设大功率快充桩（60kW以上），满足商业区高频充电需求\n2. 配置8-12个充电枪位，满足高峰期需求\n3. 建议尽快推进选址报批流程" : s.totalScore >= 6 ? "**可以考虑建站。** 该位置综合评分" + s.totalScore + "/10，基本满足建站条件。建议：\n1. 建设中等规模充电站（4-8枪位）\n2. 重点关注" + (s.scoreBreakdown.poi < 7 ? "提升周边引流" : "") + (s.scoreBreakdown.traffic < 7 ? "交通接入优化" : "") + "等方面\n3. 建议开展为期1个月的实地调研后再决策" : "**暂不推荐建站。** 该位置综合评分" + s.totalScore + "/10，存在明显短板。建议：\n1. 在半径2km范围内寻找评分更高的备选位置\n2. 重点关注评分在8分以上的POI密集区域\n3. 参考系统推荐的高需求POI排行榜进行选址"}
+
+---
+
+*本报告由福州新能源充电桩智能选址平台自动生成，数据基于福州市实地调研数据。*`;
+        }
 
         const db = await getDb();
         if (db) {

@@ -203,6 +203,39 @@ export default function MapAnalysis() {
     });
   }, [zonesResult, layers.zones]);
 
+  // 渲染道路交通流量图层
+  useEffect(() => {
+    const map = mapInstance.current;
+    if (!map || !trafficResult?.data) return;
+    if (!layers.roads) return;
+    const getTrafficColor = (intensity: number) => {
+      if (intensity >= 8) return "#ef4444"; // 高流量 - 红色
+      if (intensity >= 6) return "#f97316"; // 中高流量 - 橙色
+      if (intensity >= 4) return "#eab308"; // 中等流量 - 黄色
+      return "#a78bfa"; // 低流量 - 紫色
+    };
+    trafficResult.data.forEach((road: any) => {
+      if (!road.path || road.path.length < 2) return;
+      const intensity = road.trafficIntensity ?? Math.min(10, (road.dailyFlow ?? 0) / 5000);
+      const color = getTrafficColor(intensity);
+      const weight = Math.max(2, Math.min(6, 2 + intensity * 0.4));
+      try {
+        const polyline = new window.AMap.Polyline({
+          path: road.path.map((p: any) => [p.lng, p.lat]),
+          strokeColor: color,
+          strokeOpacity: 0.85,
+          strokeWeight: weight,
+          strokeStyle: "solid",
+          extData: { type: "road", data: road },
+        });
+        map.add(polyline);
+        markersRef.current.push(polyline);
+      } catch (e) {
+        // 忽略单条道路渲染错误
+      }
+    });
+  }, [trafficResult, layers.roads]);
+
   const toggleLayer = (key: keyof typeof layers) => {
     setLayers(prev => ({ ...prev, [key]: !prev[key] }));
     // 简单实现：切换时清除并重绘（生产环境可用图层管理）
